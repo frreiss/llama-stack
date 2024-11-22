@@ -5,6 +5,7 @@
 # the root directory of this source tree.
 
 import json
+import logging
 import re
 import tempfile
 
@@ -12,7 +13,6 @@ from abc import abstractmethod
 from typing import List, Optional
 
 import requests
-from termcolor import cprint
 
 from .ipython_tool.code_execution import (
     CodeExecutionContext,
@@ -25,6 +25,9 @@ from llama_stack.apis.inference import *  # noqa: F403
 from llama_stack.apis.agents import *  # noqa: F403
 
 from .base import BaseTool
+
+
+log = logging.getLogger(__name__)
 
 
 def interpret_content_as_attachment(content: str) -> Optional[Attachment]:
@@ -86,10 +89,13 @@ class PhotogenTool(SingleMessageBuiltinTool):
 class SearchTool(SingleMessageBuiltinTool):
     def __init__(self, engine: SearchEngineType, api_key: str, **kwargs) -> None:
         self.api_key = api_key
+        self.engine_type = engine
         if engine == SearchEngineType.bing:
             self.engine = BingSearch(api_key, **kwargs)
         elif engine == SearchEngineType.brave:
             self.engine = BraveSearch(api_key, **kwargs)
+        elif engine == SearchEngineType.tavily:
+            self.engine = TavilySearch(api_key, **kwargs)
         else:
             raise ValueError(f"Unknown search engine: {engine}")
 
@@ -257,6 +263,21 @@ class BraveSearch:
         return {"query": query, "top_k": clean_response}
 
 
+class TavilySearch:
+    def __init__(self, api_key: str) -> None:
+        self.api_key = api_key
+
+    async def search(self, query: str) -> str:
+        response = requests.post(
+            "https://api.tavily.com/search",
+            json={"api_key": self.api_key, "query": query},
+        )
+        return json.dumps(self._clean_tavily_response(response.json()))
+
+    def _clean_tavily_response(self, search_response, top_k=3):
+        return {"query": search_response["query"], "top_k": search_response["results"]}
+
+
 class WolframAlphaTool(SingleMessageBuiltinTool):
     def __init__(self, api_key: str) -> None:
         self.api_key = api_key
@@ -365,7 +386,7 @@ class CodeInterpreterTool(BaseTool):
             if res_out != "":
                 pieces.extend([f"[{out_type}]", res_out, f"[/{out_type}]"])
                 if out_type == "stderr":
-                    cprint(f"ipython tool error: ↓\n{res_out}", color="red")
+                    log.error(f"ipython tool error: ↓\n{res_out}")
 
         message = ToolResponseMessage(
             call_id=tool_call.call_id,

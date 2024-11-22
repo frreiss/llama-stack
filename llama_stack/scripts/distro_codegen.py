@@ -50,7 +50,7 @@ def process_template(template_dir: Path, progress) -> None:
             template.save_distribution(
                 yaml_output_dir=REPO_ROOT / "llama_stack" / "templates" / template.name,
                 doc_output_dir=REPO_ROOT
-                / "docs/source/getting_started/distributions"
+                / "docs/source/distributions"
                 / f"{template.distro_type}_distro",
             )
         else:
@@ -82,7 +82,10 @@ def collect_template_dependencies(template_dir: Path) -> tuple[str, list[str]]:
             template = template_func()
             normal_deps, special_deps = get_provider_dependencies(template.providers)
             # Combine all dependencies in order: normal deps, special deps, server deps
-            all_deps = normal_deps + special_deps + SERVER_DEPENDENCIES
+            all_deps = sorted(list(set(normal_deps + SERVER_DEPENDENCIES))) + sorted(
+                list(set(special_deps))
+            )
+
             return template.name, all_deps
     except Exception:
         return None, []
@@ -100,7 +103,7 @@ def generate_dependencies_file():
 
     deps_file = REPO_ROOT / "distributions" / "dependencies.json"
     with open(deps_file, "w") as f:
-        json.dump(distribution_deps, f, indent=2)
+        f.write(json.dumps(distribution_deps, indent=2) + "\n")
 
 
 def main():

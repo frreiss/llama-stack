@@ -54,6 +54,15 @@ def available_providers() -> List[ProviderSpec]:
         ),
         InlineProviderSpec(
             api=Api.inference,
+            provider_type="inline::vllm2",
+            pip_packages=[
+                "vllm",
+            ],
+            module="llama_stack.providers.inline.inference.vllm2",
+            config_class="llama_stack.providers.inline.inference.vllm2.VLLMConfig2",
+        ),
+        InlineProviderSpec(
+            api=Api.inference,
             provider_type="inline::granite",
             pip_packages=["vllm",],
             module="llama_stack.providers.inline.inference.granite",

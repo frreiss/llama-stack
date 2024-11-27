@@ -72,6 +72,31 @@ def log(msg: str):
     time_str = datetime.datetime.now().strftime("%H:%M:%S")
     print(f"{time_str}: {msg}")
     
+    
+def _merge_context_into_content(message: Message) -> Message: # type: ignore
+    """
+    Merge the ``context`` field of a Llama Stack ``Message`` object into
+    the content field for compabilitiy with OpenAI-style APIs.
+    
+    Generates a content string that emulates the current behavior
+    of ``llama_models.llama3.api.chat_format.encode_message()``.
+    
+    :param message: Message that may include ``context`` field
+    
+    :returns: A version of ``message`` with any context merged into the
+     ``content`` field.
+    """
+    if not isinstance(message, UserMessage): # Separate type check for linter
+        return message
+    if message.context is None:  
+        return message
+    return UserMessage(
+        role=message.role,
+        # Emumate llama_models.llama3.api.chat_format.encode_message()
+        content=message.content + "\n\n" + message.context,
+        context=None
+    )
+    
    
 def _convert_finish_reason(finish_reason: str | None) -> str | None:
     """Convert an OpenAI "finish_reason" result to the equivalent
@@ -94,10 +119,8 @@ def _response_format_to_guided_decoding_params(
     "ResponseFormat" to describe the object that is a wrapper around
     another object that is a wrapper around another object inside 
     someone else's constrained decoding library.
-    Here we translate from Llama Stack's code that stands around watching 
-    other code do the work to vLLM's code that does the same. 
-    Since we're interfacing with the layer of vLLM below the 
-    OpenAI-compatible API, we get to skip one level of glue.
+    Here we translate from Llama Stack's wrapper code to vLLM's code
+    that does the same.
     
     :param response_format: Llama Stack version of constrained decoding
      info. Can be ``None``, indicating no constraints.
@@ -130,7 +153,7 @@ def _convert_sampling_params(sampling_params: Optional[SamplingParams],
                              response_format: Optional[ResponseFormat]) \
     -> vllm.SamplingParams:
     """Convert sampling and constrained decoding configuration from 
-    Llama Stack's proprietary format to vLLM's propietary format."""
+    Llama Stack's format to vLLM's format."""
     if sampling_params is None:
         # In the absence of a user-provided sampling config, we use
         # Llama Stack defaults, which are different from vLLM defaults.
@@ -159,8 +182,8 @@ def _convert_sampling_params(sampling_params: Optional[SamplingParams],
 def _convert_tools(tools: Optional[List[ToolDefinition]] = None) \
             -> List[vllm.entrypoints.openai.protocol.ChatCompletionToolsParam]:
     """
-    Convert the list of available tools from Llama Stack's proprietary 
-    format to vLLM's version of OpenAI's proprietary format.
+    Convert the list of available tools from Llama Stack's format to vLLM's 
+    version of OpenAI's format.
     """
     if tools is None:
         return []
@@ -224,7 +247,7 @@ class VLLMInferenceImpl2(Inference, ModelsProtocolPrivate):
     
     def __init__(self, config: VLLMConfig2):
         self.config = config 
-        print(f"Config is: {self.config}")
+        log(f"Config is: {self.config}")
         
         self.register_helper = ModelRegistryHelper(
             build_model_aliases())
@@ -251,7 +274,7 @@ class VLLMInferenceImpl2(Inference, ModelsProtocolPrivate):
         :returns: The input ``Model`` object. It may or may not be permissible
          to change fields before returning this object.
         """
-        print(f"In register_model({model})")
+        log(f"In register_model({model})")
         
         # First attempt to interpret the model coordinates as a Llama model name
         resolved_llama_model = llama_models.sku_list.resolve_model(
@@ -264,7 +287,7 @@ class VLLMInferenceImpl2(Inference, ModelsProtocolPrivate):
             # Not a Llama model name. Pass the model id through to vLLM's loader
             resolved_model_id = model.provider_model_id
         
-        print(f"Resolved model id: {resolved_model_id}")
+        log(f"Resolved model id: {resolved_model_id}")
         
         if self.resolved_model_id is not None:
             if resolved_model_id != self.resolved_model_id:
@@ -323,7 +346,7 @@ class VLLMInferenceImpl2(Inference, ModelsProtocolPrivate):
         self.resolved_model_id = resolved_model_id
         self.model_ids.add(model.model_id)
         
-        print(f"Finished preloading model: {resolved_model_id}")
+        log(f"Finished preloading model: {resolved_model_id}")
         
         return model
         
@@ -369,22 +392,20 @@ class VLLMInferenceImpl2(Inference, ModelsProtocolPrivate):
                              f"Registered IDs are: {self.model_ids}")
         
         
-        # Arguments to the vLLM call must be packaged as a dataclass.
+        # Arguments to the vLLM call must be packaged as a ChatCompletionRequest
+        # dataclass.
         # Note that this dataclass has the same name as a similar dataclass in
         # Llama Stack.
         converted_messages = [
-            await convert_message_to_dict(m, download=True)
+            await convert_message_to_dict(
+                _merge_context_into_content(m), 
+                download=True)
             for m in messages
         ]
         converted_sampling_params = _convert_sampling_params(
             sampling_params, response_format
         )
-        
-        #print(f"Converted sampling params:\n{converted_sampling_params}")
-        
         converted_tools = _convert_tools(tools)
-        
-        print(f"Converted tools: {converted_tools}")
         
         # Llama will try to use built-in tools with no tool catalog, so don't enable 
         # tool choice unless at least one tool is enabled.
@@ -392,9 +413,7 @@ class VLLMInferenceImpl2(Inference, ModelsProtocolPrivate):
         if tool_choice == ToolChoice.auto and tools is not None and len(tools) > 0:
             converted_tool_choice = "auto"
             
-        
-        # TODO: Figure out what to do with the tool_prompt_format argument
-        
+        # TODO: Figure out what to do with the tool_prompt_format argument   
         # TODO: Convert logprobs argument
         
         chat_completion_request = vllm.entrypoints.openai.protocol.ChatCompletionRequest(
@@ -422,10 +441,10 @@ class VLLMInferenceImpl2(Inference, ModelsProtocolPrivate):
             chat_completion_request.guided_regex = g.regex
             chat_completion_request.guided_grammar = g.grammar         
         
-        print(f"Converted request: {chat_completion_request}")
+        log(f"Converted request: {chat_completion_request}")
         
         vllm_result = await self.chat.create_chat_completion(chat_completion_request)
-        print(f"Result from vLLM: {vllm_result}")
+        log(f"Result from vLLM: {vllm_result}")
         if isinstance(vllm_result, vllm.entrypoints.openai.protocol.ErrorResponse):
             raise ValueError(f"Error from vLLM layer: {vllm_result}")
         
@@ -486,7 +505,7 @@ class VLLMInferenceImpl2(Inference, ModelsProtocolPrivate):
         
         # TODO: Convert logprobs
         
-        print(f"Converted message: {converted_message}")
+        log(f"Converted message: {converted_message}")
         
         return ChatCompletionResponse(
             completion_message=converted_message,
@@ -508,8 +527,8 @@ class VLLMInferenceImpl2(Inference, ModelsProtocolPrivate):
         index_to_tool_call: Dict[int,Dict] = dict()
         
         async for chunk_str in vllm_result:    
-            # Due to OpenAI compatibility, each string in the stream
-            # should start with "data: " and end with "\n\n".
+            # Due to OpenAI compatibility, each event in the stream
+            # will start with "data: " and end with "\n\n".
             _PREFIX = "data: "
             _SUFFIX = "\n\n"
             if not chunk_str.startswith(_PREFIX) or not chunk_str.endswith(_SUFFIX):
@@ -523,20 +542,17 @@ class VLLMInferenceImpl2(Inference, ModelsProtocolPrivate):
             if data_str == "[DONE]":
                 return
             
-            # Anything that is not "[DONE]" should be JSON
-            #print(f"Parsing JSON: {data_str}")
+            # Anything that is not "[DONE]" should be a JSON record
             parsed_chunk = json.loads(data_str)
             
             #print(f"Parsed JSON event to:\n{json.dumps(parsed_chunk, indent=2)}")
             
-            # Result may contain multiple completions, but Llama Stack APIs
+            # The result may contain multiple completions, but Llama Stack APIs
             # only support returning one.
             first_choice = parsed_chunk["choices"][0]
             converted_stop_reason = _convert_finish_reason(first_choice["finish_reason"])
             delta_record = first_choice["delta"]
-                  
-            #print(f"Stop reason {first_choice["finish_reason"]} => {converted_stop_reason}")
-            
+                              
             if "content" in delta_record:
                 # Text delta
                 yield ChatCompletionResponseStreamChunk(
@@ -547,12 +563,12 @@ class VLLMInferenceImpl2(Inference, ModelsProtocolPrivate):
                     )
                 )
             elif "tool_calls" in delta_record:
-                # Tool call(s). Buffer until we get a "tool calls" stop reason
+                # Tool call(s). Llama Stack APIs do not have a clear way to return
+                # partial tool calls, so buffer until we get a "tool calls" stop reason
                 for tc in delta_record["tool_calls"]:
                     index = tc["index"]
                     if index not in index_to_tool_call:
                         # First time this tool call is showing up
-                        print(f"First time seeing index {index} (type {type(index)})")
                         index_to_tool_call[index] = dict()
                     tool_call = index_to_tool_call[index]
                     if "id" in tc:
@@ -567,16 +583,15 @@ class VLLMInferenceImpl2(Inference, ModelsProtocolPrivate):
                             tool_call["arguments_str"] += tc["function"]["arguments"]
             else:
                 raise ValueError(f"Don't know how to parse event delta: {delta_record}")
-            
-            #print(f"index_to_tool_call:\n{index_to_tool_call}")
-            
+                        
             if first_choice["finish_reason"] == "tool_calls":
                 # Special OpenAI code for "tool calls complete".
                 # Output the buffered tool calls. Llama Stack requires a separate
                 # event per tool call.
                 for tool_call_record in index_to_tool_call.values():
-                    # Arguments come in as a string. Parse the completed string
-                    tool_call_record["arguments"] = json.loads(tool_call_record["arguments_str"])
+                    # Arguments come in as a string. Parse the completed string.
+                    tool_call_record["arguments"] = json.loads(
+                        tool_call_record["arguments_str"])
                     del tool_call_record["arguments_str"]
                     
                     yield ChatCompletionResponseStreamChunk(

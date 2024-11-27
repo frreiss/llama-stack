@@ -12,6 +12,10 @@ providers:
   - provider_id: inline::granite-vllm
     provider_type: inline::vllm2
     config:
+      # Granite is small enough that vLLM can compile CUDA graphs
+      enforce_eager: false
+      # Cumulative utilization in addition to the other vLLM provider
+      # in this config
       gpu_memory_utilization: 0.9
   safety:
   - provider_id: inline::llama-guard

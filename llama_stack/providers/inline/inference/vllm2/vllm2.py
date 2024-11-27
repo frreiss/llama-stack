@@ -43,17 +43,27 @@ from llama_stack.apis.models import *  # noqa: F403
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.sampling_params import SamplingParams as VLLMSamplingParams
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_engine import (
     BaseModelPath
 )
 
+# These vLLM modules contain names that overlap with Llama Stack names, 
+# so we import fully-qualified names
 import vllm.entrypoints.openai.protocol
-
+import vllm.sampling_params
 ######################
 # Constants go here
 
+# Map from Hugging Face model architecture name to appropriate tool parser.
+# See vllm.entrypoints.openai.tool_parsers.ToolParserManager.tool_parsers
+# for the full list of available parsers.
+# TODO: Expand this list
+CONFIG_TYPE_TO_TOOL_PARSER = {
+    "GraniteConfig": "granite",
+    "MllamaConfig": "llama3_json",
+}
+DEFAULT_TOOL_PARSER = "pythonic"
 
 #####################
 # Functions go here
@@ -75,7 +85,122 @@ def _convert_finish_reason(finish_reason: str | None) -> str | None:
     else:
         return StopReason.out_of_tokens
 
+
+def _response_format_to_guided_decoding_params(
+        response_format: Optional[ResponseFormat]) \
+            -> vllm.sampling_params.GuidedDecodingParams:
+    """
+    Like Llama Stack, vLLM's OpenAI-compatible API also uses the name 
+    "ResponseFormat" to describe the object that is a wrapper around
+    another object that is a wrapper around another object inside 
+    someone else's constrained decoding library.
+    Here we translate from Llama Stack's code that stands around watching 
+    other code do the work to vLLM's code that does the same. 
+    Since we're interfacing with the layer of vLLM below the 
+    OpenAI-compatible API, we get to skip one level of glue.
     
+    :param response_format: Llama Stack version of constrained decoding
+     info. Can be ``None``, indicating no constraints.
+    :returns: The equivalent dataclass object for the low-level inference 
+     layer of vLLM.
+    """
+    if response_format is None:
+        return vllm.sampling_params.GuidedDecodingParams()
+    
+    # Llama Stack currently implements fewer types of constrained
+    # decoding than vLLM does. Translate the types that exist and 
+    # detect if Llama Stack adds new ones.
+    if isinstance(response_format, JsonSchemaResponseFormat):
+        return vllm.sampling_params.GuidedDecodingParams(
+            json=response_format.json_schema
+        )
+    elif isinstance(response_format, GrammarResponseFormat):
+        # BNF grammar.
+        # Llama Stack uses the parse tree of the grammar, while vLLM
+        # uses the string representation of the grammar.
+        raise TypeError(f"Constrained decoding with BNF grammars is not "
+                        f"currently implemented, because the reference "
+                        f"implementation does not implement it.")
+    else:
+        raise TypeError(f"ResponseFormat object is of unexpected "
+                        f"subtype '{type(response_format)}'")
+
+
+def _convert_sampling_params(sampling_params: Optional[SamplingParams],
+                             response_format: Optional[ResponseFormat]) \
+    -> vllm.SamplingParams:
+    """Convert sampling and constrained decoding configuration from 
+    Llama Stack's proprietary format to vLLM's propietary format."""
+    if sampling_params is None:
+        # In the absence of a user-provided sampling config, we use
+        # Llama Stack defaults, which are different from vLLM defaults.
+        sampling_params = SamplingParams()
+    
+    # vLLM can do top-p and top-k at the same time, so we need to improvise
+    vllm_top_k = -1 if sampling_params.top_k == 0 else sampling_params.top_k
+    vllm_sampling_params = vllm.SamplingParams.from_optional(
+        max_tokens=(None if sampling_params.max_tokens == 0
+                    else sampling_params.max_tokens),
+        # Assume that vLLM's default stop token will work
+        #stop_token_ids=[tokenizer.eos_token_id],
+        temperature=sampling_params.temperature,
+        top_p=(sampling_params.top_p 
+                if sampling_params.strategy is SamplingStrategy.top_p
+                else 1.0),
+        top_k=(vllm_top_k
+                if sampling_params.strategy is SamplingStrategy.top_k
+                else -1),
+        repetition_penalty=sampling_params.repetition_penalty,
+        guided_decoding=_response_format_to_guided_decoding_params(response_format)
+    ) 
+    return vllm_sampling_params
+    
+    
+def _convert_tools(tools: Optional[List[ToolDefinition]] = None) \
+            -> List[vllm.entrypoints.openai.protocol.ChatCompletionToolsParam]:
+    """
+    Convert the list of available tools from Llama Stack's proprietary 
+    format to vLLM's version of OpenAI's proprietary format.
+    """
+    if tools is None:
+        return []
+    
+    result = []
+    for t in tools:
+        if isinstance(t.tool_name, BuiltinTool):
+            raise NotImplementedError("Built-in tools not yet implemented")
+        if t.parameters is None:
+            parameters = None
+        else: # if t.parameters is not None
+            # Convert the "required" flags to a list of required params
+            required_params = [k for k, v in t.parameters.items() if v.required]
+            parameters = {
+                "type": "object", # Mystery value that shows up in OpenAI docs
+                "properties": {
+                    k: {
+                        "type": v.param_type,
+                        "description": v.description
+                    }
+                    for k, v in t.parameters.items()
+                },
+                "required": required_params
+            }    
+        
+        function_def = vllm.entrypoints.openai.protocol.FunctionDefinition(
+            name=t.tool_name,
+            description=t.description,
+            parameters=parameters
+        )
+        
+        # Every tool definition is double-boxed in a ChatCompletionToolsParam
+        result.append(
+            vllm.entrypoints.openai.protocol.ChatCompletionToolsParam(
+                function=function_def
+            )
+        )
+    return result
+ 
+
     
 ######################
 # Classes go here
@@ -106,10 +231,10 @@ class VLLMInferenceImpl2(Inference, ModelsProtocolPrivate):
         self.formatter = ChatFormat(Tokenizer.get_instance())
         
         # The following are initialized when paths are bound to this provider
-        self._resolved_model_id = None
+        self.resolved_model_id = None
         self.model_ids = set()
-        self._engine = None
-        self._chat = None
+        self.engine = None
+        self.chat = None
     
     ###########################################################################
     # METHODS INHERITED FROM ModelsProtocolPrivate INTERFACE
@@ -141,10 +266,10 @@ class VLLMInferenceImpl2(Inference, ModelsProtocolPrivate):
         
         print(f"Resolved model id: {resolved_model_id}")
         
-        if self._resolved_model_id is not None:
-            if resolved_model_id != self._resolved_model_id:
+        if self.resolved_model_id is not None:
+            if resolved_model_id != self.resolved_model_id:
                 raise ValueError(f"Attempted to serve two LLMs (ids "
-                                 f"'{self._resolved_model_id}') and "
+                                 f"'{self.resolved_model_id}') and "
                                  f"'{resolved_model_id}') from one copy of "
                                  f"provider '{self}'. Use multiple "
                                  f"copies of the provider instead.")
@@ -163,12 +288,26 @@ class VLLMInferenceImpl2(Inference, ModelsProtocolPrivate):
             max_num_seqs=self.config.max_num_seqs,
             max_model_len=self.config.max_model_len,
         )
-        self._engine = AsyncLLMEngine.from_engine_args(engine_args)
+        self.engine = AsyncLLMEngine.from_engine_args(engine_args)
+        
+        # vLLM currently requires the user to specify the tool parser 
+        # manually. To choose a tool parser, we need to determine what
+        # model architecture is being used. For now, we infer that 
+        # information from what config class the model uses.
+        low_level_model_config = self.engine.engine.get_model_config()
+        hf_config = low_level_model_config.hf_config
+        hf_config_class_name = hf_config.__class__.__name__
+        if hf_config_class_name in CONFIG_TYPE_TO_TOOL_PARSER:
+            tool_parser = CONFIG_TYPE_TO_TOOL_PARSER[hf_config_class_name]
+        else:
+            # No info -- choose a default so we can at least attempt tool
+            # use.
+            tool_parser = DEFAULT_TOOL_PARSER
         
         # Wrap the lower-level engine in an OpenAI-compatible chat API
-        model_config = await self._engine.get_model_config()
-        self._chat = OpenAIServingChat(
-            engine_client=self._engine,
+        model_config = await self.engine.get_model_config()
+        self.chat = OpenAIServingChat(
+            engine_client=self.engine,
             model_config=model_config,
             base_model_paths=[
                 # The layer below us will only see resolved model IDs
@@ -178,8 +317,10 @@ class VLLMInferenceImpl2(Inference, ModelsProtocolPrivate):
             prompt_adapters=None,
             request_logger=None,
             chat_template=None,
+            enable_auto_tools=True,
+            tool_parser=tool_parser
         )
-        self._resolved_model_id = resolved_model_id
+        self.resolved_model_id = resolved_model_id
         self.model_ids.add(model.model_id)
         
         print(f"Finished preloading model: {resolved_model_id}")
@@ -223,65 +364,10 @@ class VLLMInferenceImpl2(Inference, ModelsProtocolPrivate):
     ) -> Union[
         ChatCompletionResponse, AsyncIterator[ChatCompletionResponseStreamChunk]
     ]:
-        """Main entry point. Bears a striking resemblance to the OpenAI API by
-        the same name.
-        
-        :param model_id: String that encodes the specific model to run. By convention,
-         this string is the name of a directory under a known location on the local
-         filesystem. We assume that upstream code has validated this string against 
-         the catalog and cleansed it of any adversarial content.
-        :param messages: List of message records that describe the conversation so 
-         far. The allowable message types change from time to time. As of this
-         writing, the types are: :class:`UserMessage`, :class:`SystemMessage`,
-         :class:`ToolResponseMessage`, and :class:`CompletionMessage`.
-         CompletionMessage is actually several types of message rolled into one
-         and is used for all AI responses.
-        :param sampling_params: Information about how and whether to sample responses
-         in a way other than top-1 greedy. How to return more than one response 
-         in a single :class:`CompletionMessage` object is left as an exercise to 
-         the reader.
-        :param tools: A catalog of available tools as of this point in the conversation.
-        :param tool_choice: A string that can be either "auto" or "required". No further
-         documentation is provided. I'm guessing that "required" means that inference
-         should raise an error if the model didn't return a tool call, and the model 
-         should be prompted to avoid triggering such an error.
-        :param tool_prompt_format: Poorly-documented mystery argument. We'll come
-         back to this one.
-        :param response_format: Object that encapsulates parameters for constrained
-         decoding. Only JSON schemas are implemented, but users are free to specify
-         a BNF grammar if they like raising NotImplementedError.
-        :param stream: If ``True``, generate results in a streaming fashion, usually
-         one token at a time. Completely changes required downstream code.
-        
-        :returns: Either the entire completion as a single object of type
-         :class:`ChatCompletionResponse` dataclass, or a stream 
-         of incremental results encoded with the :class:`ChatCompletionResponseStreamChunk`
-         class. These classes use different names to refer to the same concepts and 
-         require different control structures to consume them.  Users need two completely
-         different sets of downstream code to consume the output of this API. 
-         Perhaps future versions of Llama Stack will change this.
-        """
-        if tool_prompt_format is None:
-            tool_prompt_format = ToolPromptFormat.json    
-        if sampling_params is None:
-            sampling_params = SamplingParams()
-            
         if model_id not in self.model_ids:
             raise ValueError(f"This adapter is not registered to model id '{model_id}'. "
                              f"Registered IDs are: {self.model_ids}")
-            
-        # request = ChatCompletionRequest(
-        #     model=self._resolved_model_id,
-        #     messages=messages,
-        #     sampling_params=sampling_params,
-        #     tools=tools or [],
-        #     tool_choice=tool_choice,
-        #     tool_prompt_format=tool_prompt_format,
-        #     stream=stream,
-        #     logprobs=logprobs,
-        # )
         
-        print(f"Messages before: {messages}")
         
         # Arguments to the vLLM call must be packaged as a dataclass.
         # Note that this dataclass has the same name as a similar dataclass in
@@ -290,23 +376,55 @@ class VLLMInferenceImpl2(Inference, ModelsProtocolPrivate):
             await convert_message_to_dict(m, download=True)
             for m in messages
         ]
+        converted_sampling_params = _convert_sampling_params(
+            sampling_params, response_format
+        )
         
-        print(f"Messages after: {converted_messages}")
+        #print(f"Converted sampling params:\n{converted_sampling_params}")
+        
+        converted_tools = _convert_tools(tools)
+        
+        print(f"Converted tools: {converted_tools}")
+        
+        # Llama will try to use built-in tools with no tool catalog, so don't enable 
+        # tool choice unless at least one tool is enabled.
+        converted_tool_choice = "none"
+        if tool_choice == ToolChoice.auto and tools is not None and len(tools) > 0:
+            converted_tool_choice = "auto"
+            
+        
+        # TODO: Figure out what to do with the tool_prompt_format argument
+        
+        # TODO: Convert logprobs argument
         
         chat_completion_request = vllm.entrypoints.openai.protocol.ChatCompletionRequest(
-            model=self._resolved_model_id,
+            model=self.resolved_model_id,
             messages=converted_messages,
-        #     sampling_params=sampling_params,
-        #     tools=tools or [],
-        #     tool_choice=tool_choice,
-        #     tool_prompt_format=tool_prompt_format,
+            tools=converted_tools,
+            tool_choice=converted_tool_choice,
             stream=stream,
+        #     tool_prompt_format=tool_prompt_format,
         #     logprobs=logprobs,
         )
         
+        # vLLM's OpenAI-compatible APIs take sampling parameters as multiple 
+        # keyword args instead of a vLLM SamplingParams object. Copy over
+        # all the parts that we currently convert from Llama Stack format.
+        for param_name in ["max_tokens", "temperature", "top_p", "top_k", 
+                           "repetition_penalty"]:
+            setattr(chat_completion_request, param_name,
+                    getattr(converted_sampling_params, param_name))
+
+        # Guided decoding parameters are further broken out
+        if converted_sampling_params.guided_decoding is not None:
+            g = converted_sampling_params.guided_decoding
+            chat_completion_request.guided_json = g.json
+            chat_completion_request.guided_regex = g.regex
+            chat_completion_request.guided_grammar = g.grammar         
+        
         print(f"Converted request: {chat_completion_request}")
         
-        vllm_result = await self._chat.create_chat_completion(chat_completion_request)
+        vllm_result = await self.chat.create_chat_completion(chat_completion_request)
         print(f"Result from vLLM: {vllm_result}")
         if isinstance(vllm_result, vllm.entrypoints.openai.protocol.ErrorResponse):
             raise ValueError(f"Error from vLLM layer: {vllm_result}")
@@ -384,83 +502,90 @@ class VLLMInferenceImpl2(Inference, ModelsProtocolPrivate):
         
         :param vllm_result: Stream of strings that need to be parsed     
         """
-        async for chunk_str in vllm_result:
-                
+        # Tool calls come in pieces, but Llama Stack expects them in bigger
+        # chunks. We build up those chunks and output them at the end.
+        # This data structure holds the current set of partial tool calls.
+        index_to_tool_call: Dict[int,Dict] = dict()
+        
+        async for chunk_str in vllm_result:    
             # Due to OpenAI compatibility, each string in the stream
             # should start with "data: " and end with "\n\n".
-            
             _PREFIX = "data: "
             _SUFFIX = "\n\n"
             if not chunk_str.startswith(_PREFIX) or not chunk_str.endswith(_SUFFIX):
                 raise ValueError(f"Can't parse result string from vLLM: "
                                     f"'{re.escape(chunk_str)}'")
             
-            # In between the "data: " and newlines is a JSON record
+            # In between the "data: " and newlines is an event record
             data_str = chunk_str[len(_PREFIX):-len(_SUFFIX)]
             
             # The end of the stream is indicated with "[DONE]"
             if data_str == "[DONE]":
                 return
             
-            # Anything that is not "[DONE]" shoudl be JSON
-            
+            # Anything that is not "[DONE]" should be JSON
             #print(f"Parsing JSON: {data_str}")
-            
             parsed_chunk = json.loads(data_str)
             
-            #print(f"Got:\n{json.dumps(parsed_chunk, indent=2)}")
+            #print(f"Parsed JSON event to:\n{json.dumps(parsed_chunk, indent=2)}")
             
             # Result may contain multiple completions, but Llama Stack APIs
             # only support returning one.
             first_choice = parsed_chunk["choices"][0]
+            converted_stop_reason = _convert_finish_reason(first_choice["finish_reason"])
+            delta_record = first_choice["delta"]
+                  
+            #print(f"Stop reason {first_choice["finish_reason"]} => {converted_stop_reason}")
             
-            yield ChatCompletionResponseStreamChunk(
-                event=ChatCompletionResponseEvent(
-                    event_type=ChatCompletionResponseEventType.progress,
-                    delta=first_choice["delta"]["content"],
-                    stop_reason=_convert_finish_reason(
-                        first_choice["finish_reason"]
+            if "content" in delta_record:
+                # Text delta
+                yield ChatCompletionResponseStreamChunk(
+                    event=ChatCompletionResponseEvent(
+                        event_type=ChatCompletionResponseEventType.progress,
+                        delta=delta_record["content"],
+                        stop_reason=converted_stop_reason
                     )
                 )
-            )
-    
-    # Code temporarily duplicated with llama_stack.providers.remote.inference.vllm
-    # to reduce scope of changes.
-    async def _get_params(
-        self, request: Union[ChatCompletionRequest, CompletionRequest]
-    ) -> dict:
-        options = get_sampling_options(request.sampling_params)
-        if "max_tokens" not in options:
-            options["max_tokens"] = self.config.max_tokens
-
-        input_dict = {}
-        media_present = request_has_media(request)
-        if isinstance(request, ChatCompletionRequest):
-            if media_present:
-                # vllm does not seem to work well with image urls, so we download the images
-                input_dict["messages"] = [
-                    await convert_message_to_dict(m, download=True)
-                    for m in request.messages
-                ]
+            elif "tool_calls" in delta_record:
+                # Tool call(s). Buffer until we get a "tool calls" stop reason
+                for tc in delta_record["tool_calls"]:
+                    index = tc["index"]
+                    if index not in index_to_tool_call:
+                        # First time this tool call is showing up
+                        print(f"First time seeing index {index} (type {type(index)})")
+                        index_to_tool_call[index] = dict()
+                    tool_call = index_to_tool_call[index]
+                    if "id" in tc:
+                        tool_call["call_id"] = tc["id"]
+                    if "function" in tc:
+                        if "name" in tc["function"]:
+                            tool_call["tool_name"] = tc["function"]["name"]
+                        if "arguments" in tc["function"]:
+                            # Arguments comes in as pieces of a string
+                            if "arguments_str" not in tool_call:
+                                tool_call["arguments_str"] = ""
+                            tool_call["arguments_str"] += tc["function"]["arguments"]
             else:
-                input_dict["prompt"] = chat_completion_request_to_prompt(
-                    request,
-                    self.register_helper.get_llama_model(request.model),
-                    self.formatter,
+                raise ValueError(f"Don't know how to parse event delta: {delta_record}")
+            
+            #print(f"index_to_tool_call:\n{index_to_tool_call}")
+            
+            if first_choice["finish_reason"] == "tool_calls":
+                # Special OpenAI code for "tool calls complete".
+                # Output the buffered tool calls. Llama Stack requires a separate
+                # event per tool call.
+                for tool_call_record in index_to_tool_call.values():
+                    # Arguments come in as a string. Parse the completed string
+                    tool_call_record["arguments"] = json.loads(tool_call_record["arguments_str"])
+                    del tool_call_record["arguments_str"]
+                    
+                    yield ChatCompletionResponseStreamChunk(
+                        event=ChatCompletionResponseEvent(
+                            event_type=ChatCompletionResponseEventType.progress,
+                            delta=ToolCallDelta(
+                                content=tool_call_record,
+                                parse_status="success"),
+                            stop_reason=converted_stop_reason
+                        )
                 )
-        else:
-            assert (
-                not media_present
-            ), "Together does not support media for Completion requests"
-            input_dict["prompt"] = completion_request_to_prompt(
-                request,
-                self.register_helper.get_llama_model(request.model),
-                self.formatter,
-            )
-
-        return {
-            "model": request.model,
-            **input_dict,
-            "stream": request.stream,
-            **options,
-        }
+    

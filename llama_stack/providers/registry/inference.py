@@ -60,6 +60,22 @@ def available_providers() -> List[ProviderSpec]:
             module="llama_stack.providers.inline.inference.sentence_transformers",
             config_class="llama_stack.providers.inline.inference.sentence_transformers.config.SentenceTransformersInferenceConfig",
         ),
+        InlineProviderSpec(
+            api=Api.inference,
+            provider_type="inline::vllm2",
+            pip_packages=[
+                "vllm",
+            ],
+            module="llama_stack.providers.inline.inference.vllm2",
+            config_class="llama_stack.providers.inline.inference.vllm2.VLLMConfig2",
+        ),
+        InlineProviderSpec(
+            api=Api.inference,
+            provider_type="inline::granite",
+            pip_packages=["vllm",],
+            module="llama_stack.providers.inline.inference.granite",
+            config_class="llama_stack.providers.inline.inference.granite.GraniteConfig",
+        ),
         remote_provider_spec(
             api=Api.inference,
             adapter=AdapterSpec(

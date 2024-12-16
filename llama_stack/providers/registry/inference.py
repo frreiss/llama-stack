@@ -18,6 +18,7 @@ META_REFERENCE_DEPS = [
     "transformers",
     "zmq",
     "lm-format-enforcer",
+    "sentence-transformers",
 ]
 
 
@@ -54,6 +55,13 @@ def available_providers() -> List[ProviderSpec]:
         ),
         InlineProviderSpec(
             api=Api.inference,
+            provider_type="inline::sentence-transformers",
+            pip_packages=["sentence-transformers"],
+            module="llama_stack.providers.inline.inference.sentence_transformers",
+            config_class="llama_stack.providers.inline.inference.sentence_transformers.config.SentenceTransformersInferenceConfig",
+        ),
+        InlineProviderSpec(
+            api=Api.inference,
             provider_type="inline::vllm2",
             pip_packages=[
                 "vllm",
@@ -75,6 +83,17 @@ def available_providers() -> List[ProviderSpec]:
                 pip_packages=[],
                 module="llama_stack.providers.remote.inference.sample",
                 config_class="llama_stack.providers.remote.inference.sample.SampleConfig",
+            ),
+        ),
+        remote_provider_spec(
+            api=Api.inference,
+            adapter=AdapterSpec(
+                adapter_type="cerebras",
+                pip_packages=[
+                    "cerebras_cloud_sdk",
+                ],
+                module="llama_stack.providers.remote.inference.cerebras",
+                config_class="llama_stack.providers.remote.inference.cerebras.CerebrasImplConfig",
             ),
         ),
         remote_provider_spec(

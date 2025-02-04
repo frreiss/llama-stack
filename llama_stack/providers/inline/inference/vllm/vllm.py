@@ -179,8 +179,6 @@ def _convert_sampling_params(
         max_tokens=(
             None if sampling_params.max_tokens == 0 else sampling_params.max_tokens
         ),
-        # Assume that vLLM's default stop token will work
-        # stop_token_ids=[tokenizer.eos_token_id],
         temperature=vllm_temperature,
         top_p=vllm_top_p,
         top_k=vllm_top_k,

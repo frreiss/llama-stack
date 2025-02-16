@@ -28,7 +28,7 @@ class VLLMConfig(BaseModel):
         default=4096, description="Maximum context length to use during serving."
     )
     max_num_seqs: int = Field(
-        default=4, description="Maximum parallel batch size for generation"
+        default=4, description="Maximum parallel batch size for generation."
     )
     enforce_eager: bool = Field(
         default=False,

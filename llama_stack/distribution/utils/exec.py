@@ -7,25 +7,34 @@
 import errno
 import logging
 import os
-import pty
 import select
 import signal
 import subprocess
 import sys
-import termios
 
 log = logging.getLogger(__name__)
 
 
+def run_with_pty(command):
+    if sys.platform.startswith("win"):
+        return _run_with_pty_win(command)
+    else:
+        return _run_with_pty_unix(command)
+
+
 # run a command in a pseudo-terminal, with interrupt handling,
 # useful when you want to run interactive things
-def run_with_pty(command):
+def _run_with_pty_unix(command):
+    import pty
+    import termios
+
     master, slave = pty.openpty()
 
     old_settings = termios.tcgetattr(sys.stdin)
     original_sigint = signal.getsignal(signal.SIGINT)
 
     ctrl_c_pressed = False
+    process = None
 
     def sigint_handler(signum, frame):
         nonlocal ctrl_c_pressed
@@ -90,10 +99,43 @@ def run_with_pty(command):
         signal.signal(signal.SIGINT, original_sigint)
 
         os.close(master)
-        if process.poll() is None:
+        if process and process.poll() is None:
             process.terminate()
             process.wait()
 
+    return process.returncode
+
+
+# run a command in a pseudo-terminal in windows, with interrupt handling,
+def _run_with_pty_win(command):
+    """
+    Runs a command with interactive support using subprocess directly.
+    """
+    try:
+        # For shell scripts on Windows, use appropriate shell
+        if isinstance(command, (list, tuple)):
+            if command[0].endswith(".sh"):
+                if os.path.exists("/usr/bin/bash"):  # WSL
+                    command = ["bash"] + command
+                else:
+                    # Use cmd.exe with bash while preserving all arguments
+                    command = ["cmd.exe", "/c", "bash"] + command
+
+        process = subprocess.Popen(
+            command,
+            shell=True,
+            universal_newlines=True,
+        )
+
+        process.wait()
+
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        return 1
+    finally:
+        if process and process.poll() is None:
+            process.terminate()
+            process.wait()
     return process.returncode
 
 

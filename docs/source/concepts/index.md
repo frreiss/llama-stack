@@ -13,6 +13,7 @@ A Llama Stack API is described as a collection of REST endpoints. We currently s
 - **DatasetIO**: interface with datasets and data loaders
 - **Scoring**: evaluate outputs of the system
 - **Eval**: generate outputs (via Inference or Agents) and perform scoring
+- **VectorIO**: perform operations on vector stores, such as adding documents, searching, and deleting documents
 - **Telemetry**: collect telemetry data from the system
 
 We are working on adding a few more APIs to complete the application lifecycle. These will include:
@@ -41,8 +42,9 @@ Some of these APIs are associated with a set of **Resources**. Here is the mappi
 - **Safety** is associated with `Shield` resources.
 - **Tool Runtime** is associated with `ToolGroup` resources.
 - **DatasetIO** is associated with `Dataset` resources.
+- **VectorIO** is associated with `VectorDB` resources.
 - **Scoring** is associated with `ScoringFunction` resources.
-- **Eval** is associated with `Model` and `EvalTask` resources.
+- **Eval** is associated with `Model` and `Benchmark` resources.
 
 Furthermore, we allow these resources to be **federated** across multiple providers. For example, you may have some Llama models served by Fireworks while others are served by AWS Bedrock. Regardless, they will all work seamlessly with the same uniform Inference API provided by Llama Stack.
 
@@ -62,10 +64,3 @@ While there is a lot of flexibility to mix-and-match providers, often users will
 
 
 **On-device Distro**: Finally, you may want to run Llama Stack directly on an edge device (mobile phone or a tablet.) We provide Distros for iOS and Android (coming soon.)
-
-```{toctree}
-:maxdepth: 1
-:hidden:
-
-distributions/index
-```

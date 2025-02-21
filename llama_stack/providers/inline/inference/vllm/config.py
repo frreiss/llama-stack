@@ -4,8 +4,10 @@
 # This source code is licensed under the terms described in the LICENSE file in
 # the root directory of this source tree.
 
-from llama_models.schema_utils import json_schema_type
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from llama_stack.providers.utils.inference import supported_inference_models
+from llama_stack.schema_utils import json_schema_type
 
 
 @json_schema_type
@@ -52,3 +54,4 @@ class VLLMConfig(BaseModel):
             "enforce_eager": "${env.ENFORCE_EAGER:False}",
             "gpu_memory_utilization": "${env.GPU_MEMORY_UTILIZATION:0.3}",
         }
+

@@ -27,6 +27,13 @@ providers:
         type: sqlite
         namespace: null
         db_path: ${env.SQLITE_STORE_DIR:~/.llama/distributions/ollama}/faiss_store.db
+  - provider_id: faiss
+    provider_type: inline::faiss
+    config:
+      kvstore:
+        type: sqlite
+        namespace: null
+        db_path: ${env.SQLITE_STORE_DIR:~/.llama/distributions/ollama}/faiss_store.db
   safety:
   - provider_id: llama-guard
     provider_type: inline::llama-guard
@@ -103,7 +110,8 @@ models:
 - metadata:
     embedding_dimension: 384
   model_id: all-MiniLM-L6-v2
-  provider_id: sentence-transformers
+  provider_id: ollama
+  provider_model_id: all-minilm:latest
   model_type: embedding
 shields:
 - shield_id: ${env.SAFETY_MODEL}
@@ -113,7 +121,7 @@ shields:
 vector_dbs: []
 datasets: []
 scoring_fns: []
-eval_tasks: []
+benchmarks: []
 tool_groups:
 - toolgroup_id: builtin::websearch
   provider_id: tavily-search
@@ -121,3 +129,5 @@ tool_groups:
   provider_id: rag-runtime
 - toolgroup_id: builtin::code_interpreter
   provider_id: code-interpreter
+server:
+  port: 8321

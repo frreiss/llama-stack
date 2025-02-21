@@ -11,31 +11,35 @@ LLAMA_STACK_DIR=${LLAMA_STACK_DIR:-}
 TEST_PYPI_VERSION=${TEST_PYPI_VERSION:-}
 PYPI_VERSION=${PYPI_VERSION:-}
 BUILD_PLATFORM=${BUILD_PLATFORM:-}
+# This timeout (in seconds) is necessary when installing PyTorch via uv since it's likely to time out
+# Reference: https://github.com/astral-sh/uv/pull/1694
+UV_HTTP_TIMEOUT=${UV_HTTP_TIMEOUT:-500}
 
-if [ "$#" -lt 5 ]; then
+# mounting is not supported by docker buildx, so we use COPY instead
+USE_COPY_NOT_MOUNT=${USE_COPY_NOT_MOUNT:-}
+
+if [ "$#" -lt 6 ]; then
   # This only works for templates
-  echo "Usage: $0 <template_name> <container_base> <pip_dependencies> <host_build_dir> [<special_pip_deps>]" >&2
-  echo "Example: $0 fireworks python:3.9-slim 'fastapi uvicorn' /path/to/build/dir" >&2
+  echo "Usage: $0 <template_or_config> <image_name> <container_base> <build_file_path> <host_build_dir> <pip_dependencies> [<special_pip_deps>]" >&2
   exit 1
 fi
 
-special_pip_deps="$6"
-
 set -euo pipefail
 
-template_name="$1"
-container_base=$2
-build_file_path=$3
-host_build_dir=$4
-pip_dependencies=$5
+template_or_config="$1"
+image_name="$2"
+container_base="$3"
+build_file_path="$4"
+host_build_dir="$5"
+pip_dependencies="$6"
+special_pip_deps="$7"
+
 
 # Define color codes
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 NC='\033[0m' # No Color
 
-SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
-REPO_DIR=$(dirname $(dirname "$SCRIPT_DIR"))
 CONTAINER_BINARY=${CONTAINER_BINARY:-docker}
 CONTAINER_OPTS=${CONTAINER_OPTS:-}
 
@@ -62,6 +66,8 @@ RUN microdnf -y update && microdnf install -y iputils net-tools wget \
     vim-minimal python3.11 python3.11-pip python3.11-wheel \
     python3.11-setuptools && ln -s /bin/pip3.11 /bin/pip && ln -s /bin/python3.11 /bin/python && microdnf clean all
 
+ENV UV_SYSTEM_PYTHON=1
+RUN pip install uv
 EOF
 else
   add_to_container << EOF
@@ -76,6 +82,8 @@ RUN apt-get update && apt-get install -y \
        bubblewrap \
        && rm -rf /var/lib/apt/lists/*
 
+ENV UV_SYSTEM_PYTHON=1
+RUN pip install uv
 EOF
 fi
 
@@ -83,7 +91,7 @@ fi
 # so we can reuse layers.
 if [ -n "$pip_dependencies" ]; then
   add_to_container << EOF
-RUN pip install --no-cache $pip_dependencies
+RUN uv pip install --no-cache $pip_dependencies
 EOF
 fi
 
@@ -91,7 +99,7 @@ if [ -n "$special_pip_deps" ]; then
   IFS='#' read -ra parts <<<"$special_pip_deps"
   for part in "${parts[@]}"; do
     add_to_container <<EOF
-RUN pip install --no-cache $part
+RUN uv pip install --no-cache $part
 EOF
   done
 fi
@@ -108,17 +116,24 @@ if [ -n "$LLAMA_STACK_DIR" ]; then
   # Install in editable format. We will mount the source code into the container
   # so that changes will be reflected in the container without having to do a
   # rebuild. This is just for development convenience.
+
+  if [ "$USE_COPY_NOT_MOUNT" = "true" ]; then
+    add_to_container << EOF
+COPY $LLAMA_STACK_DIR $stack_mount
+EOF
+  fi
+
   add_to_container << EOF
-RUN pip install --no-cache -e $stack_mount
+RUN uv pip install --no-cache -e $stack_mount
 EOF
 else
   if [ -n "$TEST_PYPI_VERSION" ]; then
     # these packages are damaged in test-pypi, so install them first
     add_to_container << EOF
-RUN pip install fastapi libcst
+RUN uv pip install fastapi libcst
 EOF
     add_to_container << EOF
-RUN pip install --no-cache --extra-index-url https://test.pypi.org/simple/ \
+RUN uv pip install --no-cache --extra-index-url https://test.pypi.org/simple/ \
   llama-models==$TEST_PYPI_VERSION llama-stack-client==$TEST_PYPI_VERSION llama-stack==$TEST_PYPI_VERSION
 
 EOF
@@ -129,7 +144,7 @@ EOF
       SPEC_VERSION="llama-stack"
     fi
     add_to_container << EOF
-RUN pip install --no-cache $SPEC_VERSION
+RUN uv pip install --no-cache $SPEC_VERSION
 EOF
   fi
 fi
@@ -140,20 +155,35 @@ if [ -n "$LLAMA_MODELS_DIR" ]; then
     exit 1
   fi
 
+  if [ "$USE_COPY_NOT_MOUNT" = "true" ]; then
+    add_to_container << EOF
+COPY $LLAMA_MODELS_DIR $models_mount
+EOF
+  fi
   add_to_container << EOF
-RUN pip uninstall -y llama-models
-RUN pip install --no-cache $models_mount
-
+RUN uv pip uninstall llama-models
+RUN uv pip install --no-cache $models_mount
 EOF
 fi
 
+# if template_or_config ends with .yaml, it is not a template and we should not use the --template flag
+if [[ "$template_or_config" != *.yaml ]]; then
+  add_to_container << EOF
+ENTRYPOINT ["python", "-m", "llama_stack.distribution.server.server", "--template", "$template_or_config"]
+EOF
+else
+  add_to_container << EOF
+ENTRYPOINT ["python", "-m", "llama_stack.distribution.server.server"]
+EOF
+fi
+
+# Add other require item commands genearic to all containers
 add_to_container << EOF
 
-# This would be good in production but for debugging flexibility lets not add it right now
-# We need a more solid production ready entrypoint.sh anyway
-#
-ENTRYPOINT ["python", "-m", "llama_stack.distribution.server.server", "--template", "$template_name"]
+# Allows running as non-root user
+RUN mkdir -p /.llama /.cache
 
+RUN chmod -R g+rw /app /.llama /.cache
 EOF
 
 printf "Containerfile created successfully in $TEMP_DIR/Containerfile\n\n"
@@ -161,11 +191,13 @@ cat $TEMP_DIR/Containerfile
 printf "\n"
 
 mounts=""
-if [ -n "$LLAMA_STACK_DIR" ]; then
-  mounts="$mounts -v $(readlink -f $LLAMA_STACK_DIR):$stack_mount"
-fi
-if [ -n "$LLAMA_MODELS_DIR" ]; then
-  mounts="$mounts -v $(readlink -f $LLAMA_MODELS_DIR):$models_mount"
+if [ "$USE_COPY_NOT_MOUNT" != "true" ]; then
+  if [ -n "$LLAMA_STACK_DIR" ]; then
+    mounts="$mounts -v $(readlink -f $LLAMA_STACK_DIR):$stack_mount"
+  fi
+  if [ -n "$LLAMA_MODELS_DIR" ]; then
+    mounts="$mounts -v $(readlink -f $LLAMA_MODELS_DIR):$models_mount"
+  fi
 fi
 
 if command -v selinuxenabled &>/dev/null && selinuxenabled; then
@@ -174,7 +206,9 @@ if command -v selinuxenabled &>/dev/null && selinuxenabled; then
 fi
 
 # Set version tag based on PyPI version
-if [ -n "$TEST_PYPI_VERSION" ]; then
+if [ -n "$PYPI_VERSION" ]; then
+  version_tag="$PYPI_VERSION"
+elif [ -n "$TEST_PYPI_VERSION" ]; then
   version_tag="test-$TEST_PYPI_VERSION"
 elif [[ -n "$LLAMA_STACK_DIR" || -n "$LLAMA_MODELS_DIR" ]]; then
   version_tag="dev"
@@ -184,8 +218,7 @@ else
 fi
 
 # Add version tag to image name
-build_name="distribution-$template_name"
-image_tag="$build_name:$version_tag"
+image_tag="$image_name:$version_tag"
 
 # Detect platform architecture
 ARCH=$(uname -m)
@@ -200,8 +233,11 @@ else
   exit 1
 fi
 
+echo "PWD: $(pwd)"
+echo "Containerfile: $TEMP_DIR/Containerfile"
 set -x
-$CONTAINER_BINARY build $CONTAINER_OPTS $PLATFORM -t $image_tag -f "$TEMP_DIR/Containerfile" "$REPO_DIR" $mounts
+$CONTAINER_BINARY build $CONTAINER_OPTS $PLATFORM -t $image_tag \
+  -f "$TEMP_DIR/Containerfile" "." $mounts --progress=plain
 
 # clean up tmp/configs
 set +x

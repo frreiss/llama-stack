@@ -105,7 +105,7 @@ shields: []
 vector_dbs: []
 datasets: []
 scoring_fns: []
-eval_tasks: []
+benchmarks: []
 tool_groups:
 - toolgroup_id: builtin::websearch
   provider_id: tavily-search
@@ -113,3 +113,5 @@ tool_groups:
   provider_id: rag-runtime
 - toolgroup_id: builtin::code_interpreter
   provider_id: code-interpreter
+server:
+  port: 8321

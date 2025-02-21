@@ -13,17 +13,17 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from pathlib import Path
-from typing import Any, get_args, get_origin, Optional, TypeVar
+from typing import Any, Optional, TypeVar, Union, get_args, get_origin
 
 import httpx
 import yaml
 from llama_stack_client import (
+    NOT_GIVEN,
     APIResponse,
     AsyncAPIResponse,
     AsyncLlamaStackClient,
     AsyncStream,
     LlamaStackClient,
-    NOT_GIVEN,
 )
 from pydantic import BaseModel, TypeAdapter
 from rich.console import Console
@@ -46,6 +46,8 @@ from llama_stack.providers.utils.telemetry.tracing import (
     setup_logger,
     start_trace,
 )
+
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
@@ -81,12 +83,13 @@ def convert_to_pydantic(annotation: Any, value: Any) -> Any:
         return value
 
     origin = get_origin(annotation)
+
     if origin is list:
         item_type = get_args(annotation)[0]
         try:
             return [convert_to_pydantic(item_type, item) for item in value]
         except Exception:
-            print(f"Error converting list {value}")
+            logger.error(f"Error converting list {value} into {item_type}")
             return value
 
     elif origin is dict:
@@ -94,17 +97,25 @@ def convert_to_pydantic(annotation: Any, value: Any) -> Any:
         try:
             return {k: convert_to_pydantic(val_type, v) for k, v in value.items()}
         except Exception:
-            print(f"Error converting dict {value}")
+            logger.error(f"Error converting dict {value} into {val_type}")
             return value
 
     try:
         # Handle Pydantic models and discriminated unions
         return TypeAdapter(annotation).validate_python(value)
+
     except Exception as e:
-        cprint(
-            f"Warning: direct client failed to convert parameter {value} into {annotation}: {e}",
-            "yellow",
-        )
+        # TODO: this is workardound for having Union[str, AgentToolGroup] in API schema.
+        # We should get rid of any non-discriminated unions in the API schema.
+        if origin is Union:
+            for union_type in get_args(annotation):
+                try:
+                    return convert_to_pydantic(union_type, value)
+                except Exception:
+                    continue
+            logger.warning(
+                f"Warning: direct client failed to convert parameter {value} into {annotation}: {e}",
+            )
         return value
 
 
@@ -142,7 +153,7 @@ class LlamaStackAsLibraryClient(LlamaStackClient):
 
         for handler in root_logger.handlers[:]:
             root_logger.removeHandler(handler)
-            print(f"Removed handler {handler.__class__.__name__} from root logger")
+            logger.info(f"Removed handler {handler.__class__.__name__} from root logger")
 
     def request(self, *args, **kwargs):
         if kwargs.get("stream"):
@@ -154,9 +165,7 @@ class LlamaStackAsLibraryClient(LlamaStackClient):
 
             def sync_generator():
                 try:
-                    async_stream = loop.run_until_complete(
-                        self.async_client.request(*args, **kwargs)
-                    )
+                    async_stream = loop.run_until_complete(self.async_client.request(*args, **kwargs))
                     while True:
                         chunk = loop.run_until_complete(async_stream.__anext__())
                         yield chunk
@@ -181,9 +190,7 @@ class AsyncLlamaStackAsLibraryClient(AsyncLlamaStackClient):
         # when using the library client, we should not log to console since many
         # of our logs are intended for server-side usage
         current_sinks = os.environ.get("TELEMETRY_SINKS", "sqlite").split(",")
-        os.environ["TELEMETRY_SINKS"] = ",".join(
-            sink for sink in current_sinks if sink != "console"
-        )
+        os.environ["TELEMETRY_SINKS"] = ",".join(sink for sink in current_sinks if sink != "console")
 
         if config_path_or_template_name.endswith(".yaml"):
             config_path = Path(config_path_or_template_name)
@@ -200,11 +207,10 @@ class AsyncLlamaStackAsLibraryClient(AsyncLlamaStackClient):
         self.custom_provider_registry = custom_provider_registry
         self.provider_data = provider_data
 
-    async def initialize(self):
+    async def initialize(self) -> bool:
         try:
-            self.impls = await construct_stack(
-                self.config, self.custom_provider_registry
-            )
+            self.endpoint_impls = None
+            self.impls = await construct_stack(self.config, self.custom_provider_registry)
         except ModuleNotFoundError as _e:
             cprint(_e.msg, "red")
             cprint(
@@ -219,7 +225,7 @@ class AsyncLlamaStackAsLibraryClient(AsyncLlamaStackClient):
                     f"Please run:\n\n{prefix}llama stack build --template {self.config_path_or_template_name} --image-type venv\n\n",
                     "yellow",
                 )
-            return False
+            raise _e
 
         if Api.telemetry in self.impls:
             setup_logger(self.impls[Api.telemetry])
@@ -236,7 +242,13 @@ class AsyncLlamaStackAsLibraryClient(AsyncLlamaStackClient):
 
         def _convert_path_to_regex(path: str) -> str:
             # Convert {param} to named capture groups
-            pattern = re.sub(r"{(\w+)}", r"(?P<\1>[^/]+)", path)
+            # handle {param:path} as well which allows for forward slashes in the param value
+            pattern = re.sub(
+                r"{(\w+)(?::path)?}",
+                lambda m: f"(?P<{m.group(1)}>{'[^/]+' if not m.group(0).endswith(':path') else '.+'})",
+                path,
+            )
+
             return f"^{pattern}$"
 
         for api, api_endpoints in endpoints.items():
@@ -247,9 +259,7 @@ class AsyncLlamaStackAsLibraryClient(AsyncLlamaStackClient):
                 func = getattr(impl, endpoint.name)
                 if endpoint.method not in endpoint_impls:
                     endpoint_impls[endpoint.method] = {}
-                endpoint_impls[endpoint.method][
-                    _convert_path_to_regex(endpoint.route)
-                ] = func
+                endpoint_impls[endpoint.method][_convert_path_to_regex(endpoint.route)] = func
 
         self.endpoint_impls = endpoint_impls
         return True
@@ -266,9 +276,7 @@ class AsyncLlamaStackAsLibraryClient(AsyncLlamaStackClient):
             raise ValueError("Client not initialized")
 
         if self.provider_data:
-            set_request_provider_data(
-                {"X-LlamaStack-Provider-Data": json.dumps(self.provider_data)}
-            )
+            set_request_provider_data({"X-LlamaStack-Provider-Data": json.dumps(self.provider_data)})
 
         if stream:
             response = await self._call_streaming(
@@ -339,7 +347,7 @@ class AsyncLlamaStackAsLibraryClient(AsyncLlamaStackClient):
                 method=options.method,
                 url=options.url,
                 params=options.params,
-                headers=options.headers,
+                headers=options.headers or {},
                 json=options.json_data,
             ),
         )
@@ -388,7 +396,7 @@ class AsyncLlamaStackAsLibraryClient(AsyncLlamaStackClient):
                 method=options.method,
                 url=options.url,
                 params=options.params,
-                headers=options.headers,
+                headers=options.headers or {},
                 json=options.json_data,
             ),
         )
@@ -408,9 +416,7 @@ class AsyncLlamaStackAsLibraryClient(AsyncLlamaStackClient):
         )
         return await response.parse()
 
-    def _convert_body(
-        self, path: str, method: str, body: Optional[dict] = None
-    ) -> dict:
+    def _convert_body(self, path: str, method: str, body: Optional[dict] = None) -> dict:
         if not body:
             return {}
 
@@ -425,7 +431,6 @@ class AsyncLlamaStackAsLibraryClient(AsyncLlamaStackClient):
         for param_name, param in sig.parameters.items():
             if param_name in body:
                 value = body.get(param_name)
-                converted_body[param_name] = convert_to_pydantic(
-                    param.annotation, value
-                )
+                converted_body[param_name] = convert_to_pydantic(param.annotation, value)
+
         return converted_body

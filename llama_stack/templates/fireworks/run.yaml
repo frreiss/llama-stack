@@ -144,6 +144,13 @@ models:
   provider_model_id: accounts/fireworks/models/llama-guard-3-11b-vision
   model_type: llm
 - metadata:
+    embedding_dimension: 768
+    context_length: 8192
+  model_id: nomic-ai/nomic-embed-text-v1.5
+  provider_id: fireworks
+  provider_model_id: nomic-ai/nomic-embed-text-v1.5
+  model_type: embedding
+- metadata:
     embedding_dimension: 384
   model_id: all-MiniLM-L6-v2
   provider_id: sentence-transformers
@@ -153,7 +160,7 @@ shields:
 vector_dbs: []
 datasets: []
 scoring_fns: []
-eval_tasks: []
+benchmarks: []
 tool_groups:
 - toolgroup_id: builtin::websearch
   provider_id: tavily-search
@@ -161,3 +168,5 @@ tool_groups:
   provider_id: rag-runtime
 - toolgroup_id: builtin::code_interpreter
   provider_id: code-interpreter
+server:
+  port: 8321

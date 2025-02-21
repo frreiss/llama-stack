@@ -23,7 +23,8 @@ The main points to consider are:
 ```
 llama stack build -h
 
-usage: llama stack build [-h] [--config CONFIG] [--template TEMPLATE] [--list-templates | --no-list-templates] [--image-type {conda,container,venv}] [--image-name IMAGE_NAME]
+usage: llama stack build [-h] [--config CONFIG] [--template TEMPLATE] [--list-templates]
+                         [--image-type {conda,container,venv}] [--image-name IMAGE_NAME] [--print-deps-only]
 
 Build a Llama stack container
 
@@ -32,14 +33,14 @@ options:
   --config CONFIG       Path to a config file to use for the build. You can find example configs in llama_stack/distribution/**/build.yaml.
                         If this argument is not provided, you will be prompted to enter information interactively
   --template TEMPLATE   Name of the example template config to use for build. You may use `llama stack build --list-templates` to check out the available templates
-  --list-templates, --no-list-templates
-                        Show the available templates for building a Llama Stack distribution (default: False)
+  --list-templates      Show the available templates for building a Llama Stack distribution
   --image-type {conda,container,venv}
                         Image Type to use for the build. This can be either conda or container or venv. If not specified, will use the image type from the template config.
   --image-name IMAGE_NAME
                         [for image-type=conda] Name of the conda environment to use for the build. If
                         not specified, currently active Conda environment will be used. If no Conda
                         environment is active, you must specify a name.
+  --print-deps-only     Print the dependencies for the stack only, without building the stack
 ```
 
 After this step is complete, a file named `<name>-build.yaml` and template file `<name>-run.yaml` will be generated and saved at the output file path specified at the end of the command.
@@ -181,11 +182,44 @@ After this step is successful, you should be able to find the built container im
 Now, let's start the Llama Stack Distribution Server. You will need the YAML configuration file which was written out at the end by the `llama stack build` step.
 
 ```
+llama stack run -h
+usage: llama stack run [-h] [--port PORT] [--image-name IMAGE_NAME] [--disable-ipv6] [--env KEY=VALUE] [--tls-keyfile TLS_KEYFILE]
+                       [--tls-certfile TLS_CERTFILE] [--image-type {conda,container,venv}]
+                       config
+
+start the server for a Llama Stack Distribution. You should have already built (or downloaded) and configured the distribution.
+
+positional arguments:
+  config                Path to config file to use for the run
+
+options:
+  -h, --help            show this help message and exit
+  --port PORT           Port to run the server on. Defaults to 8321
+  --image-name IMAGE_NAME
+                        Name of the image to run. Defaults to the current conda environment
+  --disable-ipv6        Disable IPv6 support
+  --env KEY=VALUE       Environment variables to pass to the server in KEY=VALUE format. Can be specified multiple times.
+  --tls-keyfile TLS_KEYFILE
+                        Path to TLS key file for HTTPS
+  --tls-certfile TLS_CERTFILE
+                        Path to TLS certificate file for HTTPS
+  --image-type {conda,container,venv}
+                        Image Type used during the build. This can be either conda or container or venv.
+
+```
+
+```
 # Start using template name
 llama stack run tgi
 
 # Start using config file
 llama stack run ~/.llama/distributions/llamastack-my-local-stack/my-local-stack-run.yaml
+
+# Start using a venv
+llama stack run --image-type venv ~/.llama/distributions/llamastack-my-local-stack/my-local-stack-run.yaml
+
+# Start using a conda environment
+llama stack run --image-type conda ~/.llama/distributions/llamastack-my-local-stack/my-local-stack-run.yaml
 ```
 
 ```

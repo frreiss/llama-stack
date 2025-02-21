@@ -7,7 +7,6 @@
 from pydantic import BaseModel
 
 from .config import SambaNovaImplConfig
-from .sambanova import SambaNovaInferenceAdapter
 
 
 class SambaNovaProviderDataValidator(BaseModel):
@@ -15,9 +14,9 @@ class SambaNovaProviderDataValidator(BaseModel):
 
 
 async def get_adapter_impl(config: SambaNovaImplConfig, _deps):
-    assert isinstance(
-        config, SambaNovaImplConfig
-    ), f"Unexpected config type: {type(config)}"
+    from .sambanova import SambaNovaInferenceAdapter
+
+    assert isinstance(config, SambaNovaImplConfig), f"Unexpected config type: {type(config)}"
     impl = SambaNovaInferenceAdapter(config)
     await impl.initialize()
     return impl

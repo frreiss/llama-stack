@@ -30,8 +30,8 @@ if [ $# -lt 3 ]; then
   exit 1
 fi
 
-build_name="$1"
-container_image="localhost/distribution-$build_name"
+image_name="$1"
+container_image="localhost/$image_name"
 shift
 
 yaml_config="$1"
@@ -40,8 +40,12 @@ shift
 port="$1"
 shift
 
+# Initialize other_args
+other_args=""
+
 # Process environment variables from --env arguments
 env_vars=""
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --env)
@@ -55,6 +59,7 @@ while [[ $# -gt 0 ]]; do
             fi
             ;;
         *)
+            other_args="$other_args $1"
             shift
             ;;
     esac
@@ -76,13 +81,15 @@ if [ -n "$LLAMA_CHECKPOINT_DIR" ]; then
   CONTAINER_OPTS="$CONTAINER_OPTS --gpus=all"
 fi
 
-version_tag="latest"
 if [ -n "$PYPI_VERSION" ]; then
   version_tag="$PYPI_VERSION"
 elif [ -n "$LLAMA_STACK_DIR" ]; then
   version_tag="dev"
 elif [ -n "$TEST_PYPI_VERSION" ]; then
   version_tag="test-$TEST_PYPI_VERSION"
+else
+  URL="https://pypi.org/pypi/llama-stack/json"
+  version_tag=$(curl -s $URL | jq -r '.info.version')
 fi
 
 $CONTAINER_BINARY run $CONTAINER_OPTS -it \
@@ -91,5 +98,8 @@ $CONTAINER_BINARY run $CONTAINER_OPTS -it \
   -v "$yaml_config:/app/config.yaml" \
   $mounts \
   --env LLAMA_STACK_PORT=$port \
-  --entrypoint='["python", "-m", "llama_stack.distribution.server.server", "--yaml-config", "/app/config.yaml"]' \
-  $container_image:$version_tag
+  --entrypoint python \
+  $container_image:$version_tag \
+  -m llama_stack.distribution.server.server \
+  --yaml-config /app/config.yaml \
+  $other_args

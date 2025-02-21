@@ -6,8 +6,9 @@
 
 from typing import Any, Dict, Optional
 
-from llama_models.schema_utils import json_schema_type
 from pydantic import BaseModel, Field
+
+from llama_stack.schema_utils import json_schema_type
 
 
 @json_schema_type
@@ -22,7 +23,7 @@ class SambaNovaImplConfig(BaseModel):
     )
 
     @classmethod
-    def sample_run_config(cls) -> Dict[str, Any]:
+    def sample_run_config(cls, **kwargs) -> Dict[str, Any]:
         return {
             "url": "https://api.sambanova.ai/v1",
             "api_key": "${env.SAMBANOVA_API_KEY}",

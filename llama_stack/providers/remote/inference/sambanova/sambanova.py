@@ -5,21 +5,44 @@
 # the root directory of this source tree.
 
 import json
-from typing import AsyncGenerator
+from typing import AsyncGenerator, List, Optional
 
-from llama_models.datatypes import CoreModelId, SamplingStrategy
-from llama_models.llama3.api.chat_format import ChatFormat
-from llama_models.llama3.api.tokenizer import Tokenizer
 from openai import OpenAI
 
 from llama_stack.apis.common.content_types import (
     ImageContentItem,
     InterleavedContent,
+    InterleavedContentItem,
     TextContentItem,
 )
-from llama_stack.apis.inference import *  # noqa: F403
+from llama_stack.apis.inference import (
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    CompletionMessage,
+    EmbeddingsResponse,
+    EmbeddingTaskType,
+    Inference,
+    LogProbConfig,
+    Message,
+    ResponseFormat,
+    SamplingParams,
+    StopReason,
+    SystemMessage,
+    TextTruncation,
+    ToolCall,
+    ToolChoice,
+    ToolConfig,
+    ToolDefinition,
+    ToolPromptFormat,
+    ToolResponseMessage,
+    UserMessage,
+)
+from llama_stack.models.llama.datatypes import (
+    GreedySamplingStrategy,
+    TopKSamplingStrategy,
+    TopPSamplingStrategy,
+)
 from llama_stack.providers.utils.inference.model_registry import (
-    build_model_alias,
     ModelRegistryHelper,
 )
 from llama_stack.providers.utils.inference.openai_compat import (
@@ -30,48 +53,13 @@ from llama_stack.providers.utils.inference.prompt_adapter import (
 )
 
 from .config import SambaNovaImplConfig
-
-MODEL_ALIASES = [
-    build_model_alias(
-        "Meta-Llama-3.1-8B-Instruct",
-        CoreModelId.llama3_1_8b_instruct.value,
-    ),
-    build_model_alias(
-        "Meta-Llama-3.1-70B-Instruct",
-        CoreModelId.llama3_1_70b_instruct.value,
-    ),
-    build_model_alias(
-        "Meta-Llama-3.1-405B-Instruct",
-        CoreModelId.llama3_1_405b_instruct.value,
-    ),
-    build_model_alias(
-        "Meta-Llama-3.2-1B-Instruct",
-        CoreModelId.llama3_2_1b_instruct.value,
-    ),
-    build_model_alias(
-        "Meta-Llama-3.2-3B-Instruct",
-        CoreModelId.llama3_2_3b_instruct.value,
-    ),
-    build_model_alias(
-        "Llama-3.2-11B-Vision-Instruct",
-        CoreModelId.llama3_2_11b_vision_instruct.value,
-    ),
-    build_model_alias(
-        "Llama-3.2-90B-Vision-Instruct",
-        CoreModelId.llama3_2_90b_vision_instruct.value,
-    ),
-]
+from .models import MODEL_ENTRIES
 
 
 class SambaNovaInferenceAdapter(ModelRegistryHelper, Inference):
     def __init__(self, config: SambaNovaImplConfig) -> None:
-        ModelRegistryHelper.__init__(
-            self,
-            model_aliases=MODEL_ALIASES,
-        )
-
+        ModelRegistryHelper.__init__(self, model_entries=MODEL_ENTRIES)
         self.config = config
-        self.formatter = ChatFormat(Tokenizer.get_instance())
 
     async def initialize(self) -> None:
         return
@@ -103,6 +91,7 @@ class SambaNovaInferenceAdapter(ModelRegistryHelper, Inference):
         tool_choice: Optional[ToolChoice] = ToolChoice.auto,
         tool_prompt_format: Optional[ToolPromptFormat] = ToolPromptFormat.json,
         stream: Optional[bool] = False,
+        tool_config: Optional[ToolConfig] = None,
         logprobs: Optional[LogProbConfig] = None,
     ) -> AsyncGenerator:
         model = await self.model_store.get_model(model_id)
@@ -112,10 +101,9 @@ class SambaNovaInferenceAdapter(ModelRegistryHelper, Inference):
             messages=messages,
             sampling_params=sampling_params,
             tools=tools or [],
-            tool_choice=tool_choice,
-            tool_prompt_format=tool_prompt_format,
             stream=stream,
             logprobs=logprobs,
+            tool_config=tool_config,
         )
         request_sambanova = await self.convert_chat_completion_request(request)
 
@@ -124,9 +112,7 @@ class SambaNovaInferenceAdapter(ModelRegistryHelper, Inference):
         else:
             return await self._nonstream_chat_completion(request_sambanova)
 
-    async def _nonstream_chat_completion(
-        self, request: ChatCompletionRequest
-    ) -> ChatCompletionResponse:
+    async def _nonstream_chat_completion(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
         response = self._get_client().chat.completions.create(**request)
 
         choice = response.choices[0]
@@ -134,47 +120,38 @@ class SambaNovaInferenceAdapter(ModelRegistryHelper, Inference):
         result = ChatCompletionResponse(
             completion_message=CompletionMessage(
                 content=choice.message.content or "",
-                stop_reason=self.convert_to_sambanova_finish_reason(
-                    choice.finish_reason
-                ),
-                tool_calls=self.convert_to_sambanova_tool_calls(
-                    choice.message.tool_calls
-                ),
+                stop_reason=self.convert_to_sambanova_finish_reason(choice.finish_reason),
+                tool_calls=self.convert_to_sambanova_tool_calls(choice.message.tool_calls),
             ),
             logprobs=None,
         )
 
         return result
 
-    async def _stream_chat_completion(
-        self, request: ChatCompletionRequest
-    ) -> AsyncGenerator:
+    async def _stream_chat_completion(self, request: ChatCompletionRequest) -> AsyncGenerator:
         async def _to_async_generator():
             streaming = self._get_client().chat.completions.create(**request)
             for chunk in streaming:
                 yield chunk
 
         stream = _to_async_generator()
-        async for chunk in process_chat_completion_stream_response(
-            stream, self.formatter
-        ):
+        async for chunk in process_chat_completion_stream_response(stream, request):
             yield chunk
 
     async def embeddings(
         self,
         model_id: str,
-        contents: List[InterleavedContent],
+        contents: List[str] | List[InterleavedContentItem],
+        text_truncation: Optional[TextTruncation] = TextTruncation.none,
+        output_dimension: Optional[int] = None,
+        task_type: Optional[EmbeddingTaskType] = None,
     ) -> EmbeddingsResponse:
         raise NotImplementedError()
 
-    async def convert_chat_completion_request(
-        self, request: ChatCompletionRequest
-    ) -> dict:
+    async def convert_chat_completion_request(self, request: ChatCompletionRequest) -> dict:
         compatible_request = self.convert_sampling_params(request.sampling_params)
         compatible_request["model"] = request.model
-        compatible_request["messages"] = await self.convert_to_sambanova_messages(
-            request.messages
-        )
+        compatible_request["messages"] = await self.convert_to_sambanova_messages(request.messages)
         compatible_request["stream"] = request.stream
         compatible_request["logprobs"] = False
         compatible_request["extra_headers"] = {
@@ -183,9 +160,7 @@ class SambaNovaInferenceAdapter(ModelRegistryHelper, Inference):
         compatible_request["tools"] = self.convert_to_sambanova_tool(request.tools)
         return compatible_request
 
-    def convert_sampling_params(
-        self, sampling_params: SamplingParams, legacy: bool = False
-    ) -> dict:
+    def convert_sampling_params(self, sampling_params: SamplingParams, legacy: bool = False) -> dict:
         params = {}
 
         if sampling_params:
@@ -197,18 +172,16 @@ class SambaNovaInferenceAdapter(ModelRegistryHelper, Inference):
                 else:
                     params["max_completion_tokens"] = sampling_params.max_tokens
 
-            if sampling_params.strategy == SamplingStrategy.top_p:
-                params["top_p"] = sampling_params.top_p
-            elif sampling_params.strategy == "top_k":
-                params["extra_body"]["top_k"] = sampling_params.top_k
-            elif sampling_params.strategy == "greedy":
-                params["temperature"] = sampling_params.temperature
+            if isinstance(sampling_params.strategy, TopPSamplingStrategy):
+                params["top_p"] = sampling_params.strategy.top_p
+            if isinstance(sampling_params.strategy, TopKSamplingStrategy):
+                params["extra_body"]["top_k"] = sampling_params.strategy.top_k
+            if isinstance(sampling_params.strategy, GreedySamplingStrategy):
+                params["temperature"] = 0.0
 
         return params
 
-    async def convert_to_sambanova_messages(
-        self, messages: List[Message]
-    ) -> List[dict]:
+    async def convert_to_sambanova_messages(self, messages: List[Message]) -> List[dict]:
         conversation = []
         for message in messages:
             content = {}

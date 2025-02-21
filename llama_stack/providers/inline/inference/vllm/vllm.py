@@ -28,7 +28,6 @@ from llama_models.llama3.api.datatypes import (
 )
 from llama_models.llama3.api.tokenizer import Tokenizer
 
-# We deep-import the names that don't conflict with Llama Stack names
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
@@ -50,6 +49,7 @@ from llama_stack.apis.inference import (
     CompletionResponse,
     CompletionResponseStreamChunk,
     EmbeddingsResponse,
+    EmbeddingTaskType,
     GrammarResponseFormat,
     Inference,
     JsonSchemaResponseFormat,
@@ -425,7 +425,10 @@ class VLLMInferenceImpl(Inference, ModelsProtocolPrivate):
     async def embeddings(
         self,
         model_id: str,
-        contents: List[InterleavedContent],  # type: ignore
+        contents: List[str] | List[InterleavedContentItem],
+        text_truncation: Optional[TextTruncation] = TextTruncation.none,
+        output_dimension: Optional[int] = None,
+        task_type: Optional[EmbeddingTaskType] = None,
     ) -> EmbeddingsResponse:
         raise NotImplementedError()
 
@@ -440,26 +443,25 @@ class VLLMInferenceImpl(Inference, ModelsProtocolPrivate):
         tool_prompt_format: Optional[ToolPromptFormat] = None,
         stream: Optional[bool] = False,
         logprobs: Optional[LogProbConfig] = None,
-    ) -> Union[
-        ChatCompletionResponse, AsyncIterator[ChatCompletionResponseStreamChunk]
-    ]:
+        tool_config: Optional[ToolConfig] = None,
+    ) -> ChatCompletionResponse | ChatCompletionResponseStreamChunk::
         if model_id not in self.model_ids:
             raise ValueError(
                 f"This adapter is not registered to model id '{model_id}'. "
                 f"Registered IDs are: {self.model_ids}"
             )
-
         # Convert to Llama Stack internal format for consistency
         request = ChatCompletionRequest(
             model=self.resolved_model_id,
             messages=messages,
             sampling_params=sampling_params,
             response_format=response_format,
-            tools=tools,
+            tools=tools or [],
             tool_choice=tool_choice,
             tool_prompt_format=tool_prompt_format,
             stream=stream,
             logprobs=logprobs,
+            tool_config=tool_config,
         )
 
         if self.is_meta_llama_model:
@@ -856,3 +858,4 @@ class VLLMInferenceImpl(Inference, ModelsProtocolPrivate):
         # If we get here, we've lost the connection with the vLLM event stream before it ended
         # normally.
         raise ValueError("vLLM event stream ended without [DONE] message.")
+

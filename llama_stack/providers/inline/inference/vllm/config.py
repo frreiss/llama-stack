@@ -4,9 +4,8 @@
 # This source code is licensed under the terms described in the LICENSE file in
 # the root directory of this source tree.
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
-from llama_stack.providers.utils.inference import supported_inference_models
 from llama_stack.schema_utils import json_schema_type
 
 
@@ -26,12 +25,8 @@ class VLLMConfig(BaseModel):
         default=4096,
         description="Maximum number of tokens to generate.",
     )
-    max_model_len: int = Field(
-        default=4096, description="Maximum context length to use during serving."
-    )
-    max_num_seqs: int = Field(
-        default=4, description="Maximum parallel batch size for generation."
-    )
+    max_model_len: int = Field(default=4096, description="Maximum context length to use during serving.")
+    max_num_seqs: int = Field(default=4, description="Maximum parallel batch size for generation.")
     enforce_eager: bool = Field(
         default=False,
         description="Whether to use eager mode for inference (otherwise cuda graphs are used).",
@@ -54,4 +49,3 @@ class VLLMConfig(BaseModel):
             "enforce_eager": "${env.ENFORCE_EAGER:False}",
             "gpu_memory_utilization": "${env.GPU_MEMORY_UTILIZATION:0.3}",
         }
-

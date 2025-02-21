@@ -16,18 +16,17 @@ import llama_models.sku_list
 # fully-qualified names
 import vllm.entrypoints.openai.protocol
 import vllm.sampling_params
-
 from llama_models.llama3.api.chat_format import ChatFormat
 from llama_models.llama3.api.datatypes import (
     SamplingParams,
     StopReason,
+    ToolCall,
     ToolDefinition,
     ToolPromptFormat,
     TopKSamplingStrategy,
     TopPSamplingStrategy,
 )
 from llama_models.llama3.api.tokenizer import Tokenizer
-
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
@@ -35,10 +34,10 @@ from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingM
 
 from llama_stack.apis.common.content_types import (
     InterleavedContent,
+    InterleavedContentItem,
     TextDelta,
     ToolCallDelta,
 )
-
 from llama_stack.apis.inference import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -56,9 +55,10 @@ from llama_stack.apis.inference import (
     LogProbConfig,
     Message,
     ResponseFormat,
+    TextTruncation,
     TokenLogProbs,
-    ToolCall,
     ToolChoice,
+    ToolConfig,
 )
 from llama_stack.apis.models import Model
 from llama_stack.providers.remote.inference.vllm.vllm import build_model_aliases
@@ -67,9 +67,9 @@ from llama_stack.providers.utils.inference.model_registry import (
     ModelsProtocolPrivate,
 )
 from llama_stack.providers.utils.inference.openai_compat import (
-    get_stop_reason,
     OpenAICompatCompletionChoice,
     OpenAICompatCompletionResponse,
+    get_stop_reason,
     process_chat_completion_stream_response,
 )
 from llama_stack.providers.utils.inference.prompt_adapter import (
@@ -78,7 +78,6 @@ from llama_stack.providers.utils.inference.prompt_adapter import (
 
 from .config import VLLMConfig
 from .openai_utils import llama_stack_chat_completion_to_openai_chat_completion_dict
-
 
 # Map from Hugging Face model architecture name to appropriate tool parser.
 # See vllm.entrypoints.openai.tool_parsers.ToolParserManager.tool_parsers for the full list of
@@ -98,9 +97,7 @@ logger = logging.getLogger(__name__)
 # logging in Llama Stack.
 logger.setLevel(logging.INFO)
 stderr_handler = logging.StreamHandler()
-stderr_handler.setFormatter(
-    logging.Formatter("%(asctime)s: %(filename)s [%(levelname)s] %(message)s")
-)
+stderr_handler.setFormatter(logging.Formatter("%(asctime)s: %(filename)s [%(levelname)s] %(message)s"))
 logger.addHandler(stderr_handler)
 
 
@@ -126,9 +123,7 @@ def _response_format_to_guided_decoding_params(
     # Llama Stack currently implements fewer types of constrained decoding than vLLM does.
     # Translate the types that exist and detect if Llama Stack adds new ones.
     if isinstance(response_format, JsonSchemaResponseFormat):
-        return vllm.sampling_params.GuidedDecodingParams(
-            json=response_format.json_schema
-        )
+        return vllm.sampling_params.GuidedDecodingParams(json=response_format.json_schema)
     elif isinstance(response_format, GrammarResponseFormat):
         # BNF grammar.
         # Llama Stack uses the parse tree of the grammar, while vLLM uses the string
@@ -138,9 +133,7 @@ def _response_format_to_guided_decoding_params(
             "reference implementation does not implement it."
         )
     else:
-        raise TypeError(
-            f"ResponseFormat object is of unexpected subtype '{type(response_format)}'"
-        )
+        raise TypeError(f"ResponseFormat object is of unexpected subtype '{type(response_format)}'")
 
 
 def _convert_sampling_params(
@@ -176,9 +169,7 @@ def _convert_sampling_params(
 
     # vLLM allows top-p and top-k at the same time.
     vllm_sampling_params = vllm.SamplingParams.from_optional(
-        max_tokens=(
-            None if sampling_params.max_tokens == 0 else sampling_params.max_tokens
-        ),
+        max_tokens=(None if sampling_params.max_tokens == 0 else sampling_params.max_tokens),
         temperature=vllm_temperature,
         top_p=vllm_top_p,
         top_k=vllm_top_k,
@@ -261,9 +252,7 @@ class VLLMInferenceImpl(Inference, ModelsProtocolPrivate):
         logger.debug(f"In register_model({model})")
 
         # First attempt to interpret the model coordinates as a Llama model name
-        resolved_llama_model = llama_models.sku_list.resolve_model(
-            model.provider_model_id
-        )
+        resolved_llama_model = llama_models.sku_list.resolve_model(model.provider_model_id)
         if resolved_llama_model is not None:
             # Load from Hugging Face repo into default local cache dir
             model_id_for_vllm = resolved_llama_model.huggingface_repo
@@ -286,16 +275,12 @@ class VLLMInferenceImpl(Inference, ModelsProtocolPrivate):
             else:
                 # Model already loaded
                 logger.info(
-                    f"Requested id {model} resolves to {model_id_for_vllm}, "
-                    f"which is already loaded. Continuing."
+                    f"Requested id {model} resolves to {model_id_for_vllm}, which is already loaded. Continuing."
                 )
                 self.model_ids.add(model.model_id)
                 return model
 
-        logger.info(
-            f"Requested id {model} resolves to {model_id_for_vllm}. Loading "
-            f"{model_id_for_vllm}."
-        )
+        logger.info(f"Requested id {model} resolves to {model_id_for_vllm}. Loading {model_id_for_vllm}.")
         if is_meta_llama_model:
             logger.info(f"Model {model_id_for_vllm} is a Meta Llama model.")
         self.is_meta_llama_model = is_meta_llama_model
@@ -365,8 +350,7 @@ class VLLMInferenceImpl(Inference, ModelsProtocolPrivate):
         """
         if model_id not in self.model_ids:
             raise ValueError(
-                f"Attempted to unregister model ID '{model_id}', "
-                f"but that ID is not registered to this provider."
+                f"Attempted to unregister model ID '{model_id}', but that ID is not registered to this provider."
             )
         self.model_ids.remove(model_id)
 
@@ -394,17 +378,14 @@ class VLLMInferenceImpl(Inference, ModelsProtocolPrivate):
     ) -> Union[CompletionResponse, AsyncIterator[CompletionResponseStreamChunk]]:
         if model_id not in self.model_ids:
             raise ValueError(
-                f"This adapter is not registered to model id '{model_id}'. "
-                f"Registered IDs are: {self.model_ids}"
+                f"This adapter is not registered to model id '{model_id}'. Registered IDs are: {self.model_ids}"
             )
         if not isinstance(content, str):
             raise NotImplementedError("Multimodal input not currently supported")
         if sampling_params is None:
             sampling_params = SamplingParams()
 
-        converted_sampling_params = _convert_sampling_params(
-            sampling_params, response_format, logprobs
-        )
+        converted_sampling_params = _convert_sampling_params(sampling_params, response_format, logprobs)
 
         logger.debug(f"{converted_sampling_params=}")
 
@@ -412,9 +393,7 @@ class VLLMInferenceImpl(Inference, ModelsProtocolPrivate):
             return self._streaming_completion(content, converted_sampling_params)
         else:
             streaming_result = None
-            async for streaming_result in self._streaming_completion(
-                content, converted_sampling_params
-            ):
+            async for streaming_result in self._streaming_completion(content, converted_sampling_params):
                 pass
             return CompletionResponse(
                 content=streaming_result.delta,
@@ -444,11 +423,10 @@ class VLLMInferenceImpl(Inference, ModelsProtocolPrivate):
         stream: Optional[bool] = False,
         logprobs: Optional[LogProbConfig] = None,
         tool_config: Optional[ToolConfig] = None,
-    ) -> ChatCompletionResponse | ChatCompletionResponseStreamChunk::
+    ) -> ChatCompletionResponse | ChatCompletionResponseStreamChunk:
         if model_id not in self.model_ids:
             raise ValueError(
-                f"This adapter is not registered to model id '{model_id}'. "
-                f"Registered IDs are: {self.model_ids}"
+                f"This adapter is not registered to model id '{model_id}'. Registered IDs are: {self.model_ids}"
             )
         # Convert to Llama Stack internal format for consistency
         request = ChatCompletionRequest(
@@ -477,12 +455,8 @@ class VLLMInferenceImpl(Inference, ModelsProtocolPrivate):
 
         # Arguments to the vLLM call must be packaged as a ChatCompletionRequest dataclass.
         # Note that this dataclass has the same name as a similar dataclass in Llama Stack.
-        request_options = (
-            await llama_stack_chat_completion_to_openai_chat_completion_dict(request)
-        )
-        chat_completion_request = (
-            vllm.entrypoints.openai.protocol.ChatCompletionRequest(**request_options)
-        )
+        request_options = await llama_stack_chat_completion_to_openai_chat_completion_dict(request)
+        chat_completion_request = vllm.entrypoints.openai.protocol.ChatCompletionRequest(**request_options)
 
         logger.debug(f"Converted request: {chat_completion_request}")
 
@@ -494,20 +468,13 @@ class VLLMInferenceImpl(Inference, ModelsProtocolPrivate):
         # Return type depends on "stream" argument
         if stream:
             if not isinstance(vllm_result, AsyncGenerator):
-                raise TypeError(
-                    f"Unexpected result type {type(vllm_result)} "
-                    f"for streaming inference call"
-                )
+                raise TypeError(f"Unexpected result type {type(vllm_result)} for streaming inference call")
             # vLLM client returns a stream of strings, which need to be parsed.
             # Stream comes in the form of an async generator.
             return self._convert_streaming_results(vllm_result)
         else:
-            if not isinstance(
-                vllm_result, vllm.entrypoints.openai.protocol.ChatCompletionResponse
-            ):
-                raise TypeError(
-                    f"Unexpected result type {type(vllm_result)} for non-streaming inference call"
-                )
+            if not isinstance(vllm_result, vllm.entrypoints.openai.protocol.ChatCompletionResponse):
+                raise TypeError(f"Unexpected result type {type(vllm_result)} for non-streaming inference call")
             return self._convert_non_streaming_results(vllm_result)
 
     ###########################################################################
@@ -544,7 +511,6 @@ class VLLMInferenceImpl(Inference, ModelsProtocolPrivate):
 
         request_output: vllm.RequestOutput = None
         async for request_output in results_generator:
-
             # Check for weird inference failures
             if request_output.outputs is None or len(request_output.outputs) == 0:
                 # This case also should never happen
@@ -558,11 +524,7 @@ class VLLMInferenceImpl(Inference, ModelsProtocolPrivate):
 
             # Convert logprobs from vLLM's format to Llama Stack's format
             logprobs = [
-                TokenLogProbs(
-                    logprobs_by_token={
-                        v.decoded_token: v.logprob for _, v in logprob_dict.items()
-                    }
-                )
+                TokenLogProbs(logprobs_by_token={v.decoded_token: v.logprob for _, v in logprob_dict.items()})
                 for logprob_dict in output.logprobs
             ]
 
@@ -587,9 +549,7 @@ class VLLMInferenceImpl(Inference, ModelsProtocolPrivate):
             if request_output.outputs[-1].token_ids[-1] == eos_token_id:
                 stop_reason = StopReason.end_of_message
 
-            yield CompletionResponseStreamChunk(
-                delta=completion_string, stop_reason=stop_reason, logprobs=logprobs
-            )
+            yield CompletionResponseStreamChunk(delta=completion_string, stop_reason=stop_reason, logprobs=logprobs)
 
         # Llama Stack requires that the last chunk have a stop reason, but vLLM doesn't always
         # provide one if it runs out of tokens.
@@ -614,9 +574,7 @@ class VLLMInferenceImpl(Inference, ModelsProtocolPrivate):
 
         # There may be multiple responses, but we can only pass through the first one.
         if len(vllm_result.choices) == 0:
-            raise ValueError(
-                "Don't know how to convert response object without any responses"
-            )
+            raise ValueError("Don't know how to convert response object without any responses")
         vllm_message = vllm_result.choices[0].message
         vllm_finish_reason = vllm_result.choices[0].finish_reason
 
@@ -646,9 +604,7 @@ class VLLMInferenceImpl(Inference, ModelsProtocolPrivate):
 
     async def _chat_completion_for_meta_llama(
         self, request: ChatCompletionRequest
-    ) -> Union[
-        ChatCompletionResponse, AsyncIterator[ChatCompletionResponseStreamChunk]
-    ]:
+    ) -> Union[ChatCompletionResponse, AsyncIterator[ChatCompletionResponseStreamChunk]]:
         """
         Subroutine that routes chat completions for Meta Llama models through Llama Stack's
         chat template instead of using vLLM's version of that template. The Llama Stack version
@@ -660,9 +616,7 @@ class VLLMInferenceImpl(Inference, ModelsProtocolPrivate):
         formatter = ChatFormat(Tokenizer.get_instance())
 
         # Note that this function call modifies `request` in place.
-        prompt = await chat_completion_request_to_prompt(
-            request, self.resolved_model_id, formatter
-        )
+        prompt = await chat_completion_request_to_prompt(request, self.resolved_model_id, formatter)
 
         model_id = list(self.model_ids)[0]  # Any model ID will do here
         completion_response_or_iterator = await self.completion(
@@ -677,18 +631,14 @@ class VLLMInferenceImpl(Inference, ModelsProtocolPrivate):
         if request.stream:
             if not isinstance(completion_response_or_iterator, AsyncIterator):
                 raise TypeError(
-                    f"Received unexpected result type {type(completion_response_or_iterator)}"
-                    f"for streaming request."
+                    f"Received unexpected result type {type(completion_response_or_iterator)}for streaming request."
                 )
-            return self._chat_completion_for_meta_llama_streaming(
-                formatter, completion_response_or_iterator
-            )
+            return self._chat_completion_for_meta_llama_streaming(formatter, completion_response_or_iterator)
 
         # elsif not request.stream:
         if not isinstance(completion_response_or_iterator, CompletionResponse):
             raise TypeError(
-                f"Received unexpected result type {type(completion_response_or_iterator)}"
-                f"for non-streaming request."
+                f"Received unexpected result type {type(completion_response_or_iterator)}for non-streaming request."
             )
         completion_response: CompletionResponse = completion_response_or_iterator
         raw_message = formatter.decode_assistant_message_from_content(
@@ -732,11 +682,7 @@ class VLLMInferenceImpl(Inference, ModelsProtocolPrivate):
                 logger.debug(f"{text_delta=}; {finish_reason=}")
 
                 yield OpenAICompatCompletionResponse(
-                    choices=[
-                        OpenAICompatCompletionChoice(
-                            finish_reason=finish_reason, text=text_delta
-                        )
-                    ]
+                    choices=[OpenAICompatCompletionChoice(finish_reason=finish_reason, text=text_delta)]
                 )
 
         stream = _generate_and_convert_to_openai_compat()
@@ -744,9 +690,7 @@ class VLLMInferenceImpl(Inference, ModelsProtocolPrivate):
             logger.debug(f"Returning chunk: {chunk}")
             yield chunk
 
-    async def _convert_streaming_results(
-        self, vllm_result: AsyncIterator
-    ) -> AsyncIterator:
+    async def _convert_streaming_results(self, vllm_result: AsyncIterator) -> AsyncIterator:
         """
         Subroutine that wraps the streaming outputs of vLLM's OpenAI-compatible
         API into a second async iterator that returns Llama Stack objects.
@@ -768,15 +712,14 @@ class VLLMInferenceImpl(Inference, ModelsProtocolPrivate):
             )
         )
 
+        converted_stop_reason = None
         async for chunk_str in vllm_result:
             # Due to OpenAI compatibility, each event in the stream will start with "data: " and
             # end with "\n\n".
             _prefix = "data: "
             _suffix = "\n\n"
             if not chunk_str.startswith(_prefix) or not chunk_str.endswith(_suffix):
-                raise ValueError(
-                    f"Can't parse result string from vLLM: " f"'{re.escape(chunk_str)}'"
-                )
+                raise ValueError(f"Can't parse result string from vLLM: '{re.escape(chunk_str)}'")
 
             # In between the "data: " and newlines is an event record
             data_str = chunk_str[len(_prefix) : -len(_suffix)]
@@ -840,17 +783,13 @@ class VLLMInferenceImpl(Inference, ModelsProtocolPrivate):
                 # call.
                 for tool_call_record in index_to_tool_call.values():
                     # Arguments come in as a string. Parse the completed string.
-                    tool_call_record["arguments"] = json.loads(
-                        tool_call_record["arguments_str"]
-                    )
+                    tool_call_record["arguments"] = json.loads(tool_call_record["arguments_str"])
                     del tool_call_record["arguments_str"]
 
                     yield ChatCompletionResponseStreamChunk(
                         event=ChatCompletionResponseEvent(
                             event_type=ChatCompletionResponseEventType.progress,
-                            delta=ToolCallDelta(
-                                tool_call=tool_call_record, parse_status="succeeded"
-                            ),
+                            delta=ToolCallDelta(tool_call=tool_call_record, parse_status="succeeded"),
                             stop_reason=converted_stop_reason,
                         )
                     )
@@ -858,4 +797,3 @@ class VLLMInferenceImpl(Inference, ModelsProtocolPrivate):
         # If we get here, we've lost the connection with the vLLM event stream before it ended
         # normally.
         raise ValueError("vLLM event stream ended without [DONE] message.")
-
